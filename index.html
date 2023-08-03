@@ -10,26 +10,44 @@
       color: white;
       background: black;
       height: 200vh;
+      margin: 0;
+      overflow-x: hidden;
     }
     .snowfall {
-      position: absolute;
-      top:50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
+      position: relative;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+    p {
+      margin: 0;
     }
   </style>
 </head>
 <body>
-  
-  <div class="snowfall">
-    <div class="test-dom">
-      <h2>this a test box for flakes to land</h2>
-    </div>
-    <div class="test-dom">
-      <h2>this a another test box for flakes to land</h2>
-    </div>
-  </div>
-  
-  <script src="./snowfall.js"></script>
+  <div id="playground"></div>
+  <script type="module">
+    import Snowfall from './snowfall.js'
+
+    // random box for flakes to land
+    const testDoms = []
+    const playground = document.getElementById('playground')
+    for (let i = 0; i < 3; i++) {
+      const testDom = document.createElement('div')
+      testDom.className = 'test-dom'
+      testDom.innerHTML = `<p>this a test box for flakes to land</p>`
+      testDom.style = `
+        position: absolute;
+        top: ${Math.random() * 100}%;
+        left: ${Math.random() * 100}%;
+        transform: translate(-50%, -50%);
+      `
+      testDoms.push(testDom)
+      playground.appendChild(testDom)
+    }
+
+    // snowfall, it takes an array of doms as argument to land on
+    const mySnowfall = new Snowfall(testDoms)
+  </script>
 </body>
 </html>
