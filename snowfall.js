@@ -183,7 +183,11 @@ Flake.prototype.swing = function (delta) {
     this.driftDuration = 300 + Math.random() * 1700;
   }
 
-  this.x += delta * this.speed * 0.2 * this.driftDirection;
+  // add a small oscillation/jitter on top of the held direction
+  this.driftPhase += delta * this.oscFreq;
+  const jitter = Math.sin(this.driftPhase) * this.oscAmplitude;
+
+  this.x += delta * this.speed * 0.1 * this.driftDirection + jitter * 0.1;
 }
 
 Flake.prototype.landed = function (sills) {
@@ -198,9 +202,6 @@ Flake.prototype.landed = function (sills) {
     ) {
       landed = true;
       return landed;
-
-      // break;
-      // 你个哈皮，人家写了个break，你就忘了return
     }
   }
 }
@@ -220,6 +221,10 @@ Flake.prototype.reset = function (x, y) {
   this.setSize();
   this.driftDirection = Math.random() > 0.5 ? 1 : -1;
   this.driftDuration = 300 + Math.random() * 1700;
+  // small oscillation parameters to make lateral motion less rigid
+  this.driftPhase = Math.random() * Math.PI * 2;
+  this.oscAmplitude = 0.2 + Math.random() * 0.8; // pixels
+  this.oscFreq = 0.003 + Math.random() * 0.007; // radians per ms
 }
 
 export default Snowfall
