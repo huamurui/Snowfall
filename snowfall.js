@@ -136,8 +136,10 @@ function Flake(x, y) {
 };
 
 Flake.prototype.setSpeed = function () {
-  // 60% 都被设为0.1...而更快的在之后0.1到0.5之间跳...
-  this.speed = Math.max(0.1, Math.random() * 0.5);
+  this.speed = 0.05 + Math.random() * 0.1;
+  if (Math.random() > 0.8) {
+    this.speed += Math.random() * 0.2;
+  }  
 };
 
 Flake.prototype.setSize = function () {
