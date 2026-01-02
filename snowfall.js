@@ -60,7 +60,7 @@ Snowfall.prototype.generateFlakes = function () {
 
   for (i = 0; i < this.max; i += 1) {
     // 即使初始化...高度也应该自动从零开始
-    this.flakes.push(new Flake(Math.floor(Math.random() * this.canvas.width), 0));
+    this.flakes.push(new Flake(Math.floor(Math.random() * this.canvas.width), 0, this));
   }
 };
 // 这个delta是时间差...
@@ -131,7 +131,8 @@ Snowfall.prototype.removeAnimation = function () {
   window.cancelAnimationFrame(this.animation);
 };
 
-function Flake(x, y) {
+function Flake(x, y, parent) {
+  this.parent = parent;
   this.reset(x, y);
 };
 
@@ -150,13 +151,39 @@ Flake.prototype.falling = function (delta) {
   this.y += delta * this.speed;
 };
 Flake.prototype.swing = function (delta) {
-  let isLeft = Math.random() > 0.5;
+  // hold a chosen horizontal direction for a short randomized duration
+  this.driftDuration -= delta;
 
-  if (isLeft) {
-    this.x -= delta * this.speed * 0.2;
-  } else {
-    this.x += delta * this.speed * 0.2;
+  if (this.driftDuration <= 0) {
+    if (this.parent && Array.isArray(this.parent.flakes)) {
+      let leftScore = 0;
+      let rightScore = 0;
+      const radius = 60;
+
+      for (let i = 0; i < this.parent.flakes.length; i++) {
+        const f = this.parent.flakes[i];
+        if (f === this) continue;
+        const dx = f.x - this.x;
+        const dy = Math.abs(f.y - this.y);
+        if (Math.abs(dx) <= radius && dy <= radius) {
+          const w = 1 / (Math.abs(dx) + 1);
+          if (dx < 0) leftScore += w; else rightScore += w;
+        }
+      }
+
+      const leftWeight = 1 / (leftScore + 1);
+      const rightWeight = 1 / (rightScore + 1);
+      const probLeft = leftWeight / (leftWeight + rightWeight);
+
+      this.driftDirection = Math.random() < probLeft ? -1 : 1;
+    } else {
+      this.driftDirection = Math.random() > 0.5 ? 1 : -1;
+    }
+
+    this.driftDuration = 300 + Math.random() * 1700;
   }
+
+  this.x += delta * this.speed * 0.2 * this.driftDirection;
 }
 
 Flake.prototype.landed = function (sills) {
@@ -191,6 +218,8 @@ Flake.prototype.reset = function (x, y) {
   this.y = y;
   this.setSpeed();
   this.setSize();
+  this.driftDirection = Math.random() > 0.5 ? 1 : -1;
+  this.driftDuration = 300 + Math.random() * 1700;
 }
 
 export default Snowfall
