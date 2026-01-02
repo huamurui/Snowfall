@@ -187,7 +187,7 @@ Flake.prototype.swing = function (delta) {
   this.driftPhase += delta * this.oscFreq;
   const jitter = Math.sin(this.driftPhase) * this.oscAmplitude;
 
-  this.x += delta * this.speed * 0.1 * this.driftDirection + jitter * 0.1;
+  this.x += delta * this.speed * 0.1 * this.driftDirection + jitter * 0.2;
 }
 
 Flake.prototype.landed = function (sills) {
