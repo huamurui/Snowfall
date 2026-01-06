@@ -4,7 +4,10 @@ function Snowfall (doms) {
     return;
   }
 
-  this.max = 300; // number of flakes
+  // number of flakes based on viewport area (approx 1 flake per 3500 px²),
+  // clamped between 50 and 800 for performance
+  const _area = window.innerWidth * window.document.body.clientHeight;
+  this.max = Math.max(50, Math.min(800, Math.round(_area / 3500)));
   this.sillsMax = 500; // number of sills
   this.flakes = [];
   this.sills = [];
@@ -40,6 +43,21 @@ Snowfall.prototype.bindDOMEvents = function () {
         throttle = undefined;
         that.canvas.width = window.innerWidth - 30;
         that.canvas.height = window.document.body.clientHeight
+
+        // recompute target max flakes based on new viewport area and adjust array
+        const _area = window.innerWidth * window.document.body.clientHeight;
+        const newMax = Math.max(50, Math.min(800, Math.round(_area / 3500)));
+
+        if (newMax > that.max) {
+          // add new flakes (random positions to avoid sudden clumping)
+          for (let n = that.max; n < newMax; n++) {
+            that.flakes.push(new Flake(Math.floor(Math.random() * that.canvas.width), Math.floor(Math.random() * that.canvas.height), that));
+          }
+        } else if (newMax < that.max) {
+          // drop extras from the end
+          that.flakes.length = newMax;
+        }
+        that.max = newMax;
       }, 100);
     }
   }, false);
