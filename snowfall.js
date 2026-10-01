@@ -8,7 +8,6 @@ const CONFIG = {
   MAX_FLAKES: 800,
   MAX_SILLS: 500,
   RESIZE_THROTTLE_MS: 100,
-  LANDING_TOLERANCE: 5,        // px above sill top to detect landing
   GRID_CELL_SIZE: 60,          // px per grid cell (both flake & sill grids)
   DRIFT_MIN_MS: 300,
   DRIFT_RANGE_MS: 1700,
@@ -19,6 +18,7 @@ const CONFIG = {
   MAX_FLAKE_SIZE: 4,
   DRIFT_SPEED_FACTOR: 0.1,
   JITTER_FACTOR: 0.2,
+  JITTER_REFERENCE_FRAME_MS: 1000 / 60, // retain the original 60 FPS sway
   OSC_AMP_BASE: 0.2,
   OSC_AMP_RANGE: 0.8,
   OSC_FREQ_BASE: 0.003,
@@ -45,7 +45,7 @@ class Grid {
     this.rows = 0;
     /** @type {Array<Array<*>>} flat array of bucket arrays */
     this.cells = [];
-    /** Reusable buffer for {@link queryNeighborhood} results */
+    /** Reusable buffer shared by rectangle and neighborhood queries */
     this._buf = [];
     /** Shared empty array returned for out-of-bounds {@link query} calls */
     this._empty = [];
@@ -118,9 +118,34 @@ class Grid {
   }
 
   /**
+   * Collect candidates from every cell overlapping the rectangle.
+   * A multi-cell item may appear more than once. The returned buffer is valid
+   * until the next rectangle or neighborhood query on this grid.
+   */
+  queryRect(x, y, w, h) {
+    const c0 = Math.max(0, Math.floor(x / this.cellSize));
+    const c1 = Math.min(this.cols - 1, Math.floor((x + w) / this.cellSize));
+    const r0 = Math.max(0, Math.floor(y / this.cellSize));
+    const r1 = Math.min(this.rows - 1, Math.floor((y + h) / this.cellSize));
+    const buf = this._buf;
+    buf.length = 0;
+
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        const bucket = this.cells[r * this.cols + c];
+        for (let i = 0; i < bucket.length; i++) {
+          buf.push(bucket[i]);
+        }
+      }
+    }
+
+    return buf;
+  }
+
+  /**
    * Collect all items in the 3×3 neighborhood around (x, y) into an internal
-   * buffer and return it.  The buffer is reused across calls — the result is
-   * only valid until the next call to queryNeighborhood on this instance.
+   * buffer and return it. The result is only valid until the next rectangle
+   * or neighborhood query on this grid.
    */
   queryNeighborhood(x, y) {
     const col = Math.floor(x / this.cellSize);
@@ -203,11 +228,14 @@ class Flake {
       this.driftDuration = CONFIG.DRIFT_MIN_MS + Math.random() * CONFIG.DRIFT_RANGE_MS;
     }
 
+    const previousPhase = this.driftPhase;
     this.driftPhase += delta * this.oscFreq;
-    const jitter = Math.sin(this.driftPhase) * this.oscAmplitude;
+    // Integrate the oscillating velocity so sway does not depend on frame rate.
+    const jitter = (Math.cos(previousPhase) - Math.cos(this.driftPhase))
+                 * this.oscAmplitude / this.oscFreq;
 
     this.x += delta * this.speed * CONFIG.DRIFT_SPEED_FACTOR * this.driftDirection
-            + jitter * CONFIG.JITTER_FACTOR;
+            + jitter * CONFIG.JITTER_FACTOR / CONFIG.JITTER_REFERENCE_FRAME_MS;
   }
 
   /**
@@ -248,27 +276,47 @@ class Flake {
   }
 
   /**
-   * Check whether this flake has landed on any nearby sill.
-   * Uses the sill grid so only a handful of candidates are tested per call,
-   * instead of the full sills array.
+   * Find the first sill crossed by the flake's bottom edge during this frame.
+   * Check horizontal overlap at the crossing time, then snap to that surface.
    *
    * @param {Grid} sillGrid
-   * @returns {boolean}
+   * @param {number} previousX
+   * @param {number} previousY
+   * @returns {{x:number, y:number, w:number, h:number}|null} the supporting sill
    */
-  landed(sillGrid) {
-    const candidates = sillGrid.query(this.x, this.y);
+  landed(sillGrid, previousX, previousY) {
+    const dx = this.x - previousX;
+    const dy = this.y - previousY;
+    if (dy <= 0) return null;
+
+    const previousBottom = previousY + this.size;
+    const candidates = sillGrid.queryRect(
+      Math.min(previousX, this.x),
+      previousBottom,
+      Math.abs(dx) + this.size,
+      dy,
+    );
+    let hit = null;
+    let hitTime = Infinity;
+
     for (let i = 0; i < candidates.length; i++) {
       const s = candidates[i];
-      if (
-        this.x > s.x &&
-        this.x < s.x + s.w &&
-        this.y > s.y - CONFIG.LANDING_TOLERANCE &&
-        this.y < s.y + s.h
-      ) {
-        return true;
+      if (s.w <= 0 || s.h <= 0) continue;
+      const time = (s.y - previousBottom) / dy;
+      if (time < 0 || time > 1 || time >= hitTime) continue;
+
+      const x = previousX + dx * time;
+      if (x < s.x + s.w && x + this.size > s.x) {
+        hit = s;
+        hitTime = time;
       }
     }
-    return false;
+
+    if (hit) {
+      this.x = previousX + dx * hitTime;
+      this.y = hit.y - this.size;
+    }
+    return hit;
   }
 
   /** @todo Implement melt animation rendering in _drawFrame. */
@@ -277,12 +325,12 @@ class Flake {
   }
 
   /**
-   * @param {number} canvasWidth
-   * @param {number} canvasHeight
-   * @returns {boolean} true if the flake is within the visible canvas area
+   * @param {number} worldWidth
+   * @param {number} worldHeight
+   * @returns {boolean} true if the flake is within the simulated document
    */
-  isVisible(canvasWidth, canvasHeight) {
-    return this.x > 0 && this.y > 0 && this.x < canvasWidth && this.y < canvasHeight;
+  isVisible(worldWidth, worldHeight) {
+    return this.x >= 0 && this.y >= 0 && this.x < worldWidth && this.y < worldHeight;
   }
 
   /**
@@ -308,136 +356,174 @@ class Flake {
 // Snowfall — orchestrator: canvas, animation loop, resize handling
 // ---------------------------------------------------------------------------
 
-class Snowfall {
-  /**
-   * @param {HTMLElement[]} doms - elements that flakes can land on
-   */
-  constructor(doms) {
-    if (!window.HTMLCanvasElement) {
-      console.warn('Snowfall: aborting — browser does not support <canvas>.');
-      return;
-    }
+// Ignore overlay mutations, including canvases owned by other instances.
+const OVERLAY_CANVASES = new WeakSet();
 
+class Snowfall {
+  /** @param {HTMLElement[]} doms - elements that flakes can land on */
+  constructor(doms = []) {
     this.flakes = [];
     /** @type {Array<{x:number, y:number, w:number, h:number}>} */
     this.sills = [];
-
-    // Two grids with different lifecycles:
-    //   flakeGrid — cleared & rebuilt every frame for neighbor drift queries
-    //   sillGrid  — built incrementally; only fully rebuilt on resize
+    this._doms = Array.from(doms);
+    this._destroyed = false;
+    this._refreshTimer = undefined;
     this.flakeGrid = new Grid(CONFIG.GRID_CELL_SIZE);
     this.sillGrid = new Grid(CONFIG.GRID_CELL_SIZE);
 
-    this.max = Snowfall.computeFlakeCount();
+    if (!window.HTMLCanvasElement) {
+      this.destroy();
+      console.warn('Snowfall: browser does not support <canvas>.');
+      return;
+    }
 
-    // Keep DOM references so we can re-query positions on resize
-    this._doms = doms;
-
-    // Convert DOM bounding rects to document-absolute coordinates.
-    // getBoundingClientRect() is viewport-relative, so we add scroll offset
-    // to match the canvas which uses position:absolute (document-relative).
-    for (let i = 0; i < doms.length; i++) {
-      const r = doms[i].getBoundingClientRect();
-      this.sills.push({
-        x: r.x + window.scrollX,
-        y: r.y + window.scrollY,
-        w: r.width,
-        h: r.height,
-      });
+    for (let i = 0; i < this._doms.length; i++) {
+      this.sills.push({ x: 0, y: 0, w: 0, h: 0 });
     }
     this._initialSillCount = this.sills.length;
-
     this._createCanvas();
+    if (!this.ctx) {
+      this.destroy();
+      console.warn('Snowfall: could not create a 2D canvas context.');
+      return;
+    }
 
-    // Size both grids to match the canvas and register initial sills
-    this.flakeGrid.resize(this.canvas.width, this.canvas.height);
+    this._resizeCanvas();
+    this._refreshDomSills();
+    this.flakeGrid.resize(this._width, this._height);
     this._rebuildSillGrid();
-
+    this.max = Snowfall.computeFlakeCount(this._width, this._height);
     this._generateFlakes();
+    this._bindLayoutHandlers();
     this._startAnimationLoop();
-    this._bindResizeHandler();
   }
 
   // ---- Static helpers -----------------------------------------------------
 
-  /** Compute the ideal number of flakes for the current viewport size. */
-  static computeFlakeCount() {
-    const area = window.innerWidth * document.body.clientHeight;
+  /** Compute flake density in document CSS pixels, independently of the bitmap. */
+  static computeFlakeCount(
+    width = document.documentElement.scrollWidth,
+    height = Math.max(window.innerHeight, document.documentElement.scrollHeight),
+  ) {
+    const area = width * height;
     return Math.max(CONFIG.MIN_FLAKES, Math.min(CONFIG.MAX_FLAKES, Math.round(area / CONFIG.FLAKES_PER_AREA)));
   }
 
   // ---- Canvas setup -------------------------------------------------------
 
-  /** Create and attach the full-page overlay canvas. */
+  /** A viewport-sized overlay does not change page overflow or body layout. */
   _createCanvas() {
     this.canvas = document.createElement('canvas');
-    this._resizeCanvas();
-    this.ctx = this.canvas.getContext('2d');
-
-    // Prevent the canvas itself from triggering a horizontal scrollbar
-    document.documentElement.style.overflowX = 'hidden';
-
+    OVERLAY_CANVASES.add(this.canvas);
+    this.canvas.setAttribute('aria-hidden', 'true');
     Object.assign(this.canvas.style, {
-      position: 'absolute',
+      position: 'fixed',
       top: '0',
       left: '0',
+      display: 'block',
+      margin: '0',
+      padding: '0',
+      border: '0',
+      maxWidth: 'none',
+      maxHeight: 'none',
       zIndex: '99999',
       pointerEvents: 'none',
     });
-
-    document.body.appendChild(this.canvas);
+    this.ctx = this.canvas.getContext('2d');
+    // A positioned or transformed body must not become the containing block.
+    document.documentElement.appendChild(this.canvas);
   }
 
-  /** Sync canvas dimensions to the current viewport. */
+  /** Measure document bounds separately from the viewport's rendering surface. */
   _resizeCanvas() {
-    this.canvas.width = window.innerWidth;
-    this.canvas.height = document.body.clientHeight;
+    const root = document.documentElement;
+    const body = document.body;
+    const viewportWidth = root.clientWidth;
+    const viewportHeight = window.innerHeight;
+    // Update CSS bounds before measuring page overflow after a viewport shrink.
+    const cssWidth = `${viewportWidth}px`;
+    const cssHeight = `${viewportHeight}px`;
+    if (this.canvas.style.width !== cssWidth) this.canvas.style.width = cssWidth;
+    if (this.canvas.style.height !== cssHeight) this.canvas.style.height = cssHeight;
+    const width = Math.max(viewportWidth, root.scrollWidth, body.scrollWidth);
+    const height = Math.max(viewportHeight, root.scrollHeight, body.scrollHeight);
+    const changed = width !== this._width || height !== this._height;
+    this._width = width;
+    this._height = height;
+    this._pixelRatio = window.devicePixelRatio || 1;
+
+    const bitmapWidth = Math.round(viewportWidth * this._pixelRatio);
+    const bitmapHeight = Math.round(viewportHeight * this._pixelRatio);
+    if (this.canvas.width !== bitmapWidth) this.canvas.width = bitmapWidth;
+    if (this.canvas.height !== bitmapHeight) this.canvas.height = bitmapHeight;
+    return changed;
   }
 
   // ---- Sill grid management -----------------------------------------------
 
-  /**
-   * Register a single sill into the sill grid.
-   * The registration rectangle is expanded upward by LANDING_TOLERANCE so that
-   * a flake approaching from above will find the sill in its own grid cell.
-   */
+  /** Only the top edge can support a falling flake. */
   _registerSill(sill) {
-    this.sillGrid.insertRect(
-      sill,
-      sill.x,
-      sill.y - CONFIG.LANDING_TOLERANCE,
-      sill.w,
-      sill.h + CONFIG.LANDING_TOLERANCE,
-    );
+    if (sill.w > 0 && sill.h > 0) {
+      this.sillGrid.insertRect(sill, sill.x, sill.y, sill.w, 0);
+    }
   }
 
   /**
    * Rebuild the sill grid from scratch.
-   * Called on resize (canvas dimensions change → grid dimensions change →
-   * numeric indices are invalidated, so all sills must be re-registered).
-   * Only ~500 sills max, and resize is throttled, so this is cheap.
+   * Re-register sills when document dimensions or target geometry change,
+   * since a new grid width invalidates the old numeric cell indices.
    */
   _rebuildSillGrid() {
-    this.sillGrid.resize(this.canvas.width, this.canvas.height);
+    this.sillGrid.resize(this._width, this._height);
     this.sillGrid.clear();
     for (let i = 0; i < this.sills.length; i++) {
       this._registerSill(this.sills[i]);
     }
   }
 
-  /**
-   * Re-query bounding rects for the original DOM landing targets.
-   * Called on resize because element positions shift with the layout.
-   */
+  /** Update document-coordinate targets; report actual geometry changes. */
   _refreshDomSills() {
+    let changed = false;
     for (let i = 0; i < this._doms.length; i++) {
-      const r = this._doms[i].getBoundingClientRect();
+      const dom = this._doms[i];
+      const r = dom.getBoundingClientRect();
       const sill = this.sills[i];
-      sill.x = r.x + window.scrollX;
-      sill.y = r.y + window.scrollY;
-      sill.w = r.width;
-      sill.h = r.height;
+      const active = dom.isConnected && r.width > 0 && r.height > 0;
+      const x = active ? r.left + window.scrollX : 0;
+      const y = active ? r.top + window.scrollY : 0;
+      const w = active ? r.width : 0;
+      const h = active ? r.height : 0;
+      if (sill.x !== x || sill.y !== y || sill.w !== w || sill.h !== h) {
+        changed = true;
+        Object.assign(sill, { x, y, w, h });
+      }
     }
+    return changed;
+  }
+
+  /** Re-measure layout immediately, including changes made through CSS APIs. */
+  refresh() {
+    if (this._destroyed) return;
+    if (this._refreshTimer !== undefined) {
+      window.clearTimeout(this._refreshTimer);
+      this._refreshTimer = undefined;
+    }
+    const resized = this._resizeCanvas();
+    const targetsMoved = this._refreshDomSills();
+    if (targetsMoved) {
+      // Snow attached to the previous layout must not remain floating in place.
+      this.sills.length = this._initialSillCount;
+    }
+    if (resized) this.flakeGrid.resize(this._width, this._height);
+    if (resized || targetsMoved) this._rebuildSillGrid();
+
+    const newMax = Snowfall.computeFlakeCount(this._width, this._height);
+    while (this.flakes.length < newMax) {
+      this.flakes.push(new Flake(this._randomX(), Math.random() * this._height));
+    }
+    this.flakes.length = newMax;
+    this.max = newMax;
+    this._drawFrame();
   }
 
   // ---- Flake lifecycle ----------------------------------------------------
@@ -449,9 +535,9 @@ class Snowfall {
     }
   }
 
-  /** @returns {number} a random x within the canvas width */
+  /** @returns {number} a random x within the simulated document */
   _randomX() {
-    return Math.floor(Math.random() * this.canvas.width);
+    return Math.floor(Math.random() * this._width);
   }
 
   /** Update every flake's position for one frame. */
@@ -466,10 +552,12 @@ class Snowfall {
     for (let i = 0; i < this.flakes.length; i++) {
       const flake = this.flakes[i];
 
+      const previousX = flake.x;
+      const previousY = flake.y;
       flake.fall(delta);
       flake.swing(delta, this.flakeGrid);
 
-      if (flake.landed(this.sillGrid)) {
+      if (flake.landed(this.sillGrid, previousX, previousY)) {
         if (this.sills.length < CONFIG.MAX_SILLS) {
           const sill = { x: flake.x, y: flake.y, w: flake.size, h: flake.size };
           this.sills.push(sill);
@@ -479,7 +567,7 @@ class Snowfall {
         continue;
       }
 
-      if (!flake.isVisible(this.canvas.width, this.canvas.height)) {
+      if (!flake.isVisible(this._width, this._height)) {
         flake.reset(this._randomX(), 0);
       }
     }
@@ -498,7 +586,10 @@ class Snowfall {
 
   /** Clear and redraw the entire frame. */
   _drawFrame() {
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    const ratio = this._pixelRatio;
+    this.ctx.setTransform(ratio, 0, 0, ratio, -window.scrollX * ratio, -window.scrollY * ratio);
 
     this.ctx.fillStyle = '#fff';
     this._drawSills();
@@ -516,6 +607,7 @@ class Snowfall {
     let lastTimestamp;
 
     const frame = (now) => {
+      if (this._destroyed) return;
       if (lastTimestamp === undefined) {
         lastTimestamp = now;
       }
@@ -543,45 +635,44 @@ class Snowfall {
 
   // ---- Event handling -----------------------------------------------------
 
-  /** Throttled resize handler that adjusts canvas, grids, and flake count. */
-  _bindResizeHandler() {
-    let throttleTimer;
-
-    this._resizeHandler = () => {
-      if (throttleTimer !== undefined) return;
-
-      throttleTimer = window.setTimeout(() => {
-        throttleTimer = undefined;
-
-        this._resizeCanvas();
-        this._refreshDomSills();
-
-        // Clear accumulated snow — DOM elements don't scale proportionally
-        // on resize, so pixel-positioned snow sills would float in wrong
-        // places. Keeping only the DOM sills and letting snow re-accumulate
-        // naturally is the cleanest approach.
-        this.sills.length = this._initialSillCount;
-
-        this.flakeGrid.resize(this.canvas.width, this.canvas.height);
-        this._rebuildSillGrid();
-
-        const newMax = Snowfall.computeFlakeCount();
-
-        if (newMax > this.max) {
-          for (let i = this.max; i < newMax; i++) {
-            this.flakes.push(
-              new Flake(this._randomX(), Math.floor(Math.random() * this.canvas.height)),
-            );
-          }
-        } else if (newMax < this.max) {
-          this.flakes.length = newMax;
-        }
-
-        this.max = newMax;
+  /** Coalesce all layout notifications into one cancellable refresh. */
+  _bindLayoutHandlers() {
+    this._layoutHandler = () => {
+      if (this._destroyed || this._refreshTimer !== undefined) return;
+      this._refreshTimer = window.setTimeout(() => {
+        this._refreshTimer = undefined;
+        this.refresh();
       }, CONFIG.RESIZE_THROTTLE_MS);
     };
+    window.addEventListener('resize', this._layoutHandler);
+    // Capture scrolls from nested containers as well as fixed/sticky targets.
+    window.addEventListener('scroll', this._layoutHandler, true);
+    document.addEventListener('load', this._layoutHandler, true);
+    document.fonts?.addEventListener('loadingdone', this._layoutHandler);
 
-    window.addEventListener('resize', this._resizeHandler);
+    if (window.ResizeObserver) {
+      this._resizeObserver = new window.ResizeObserver(this._layoutHandler);
+      this._resizeObserver.observe(document.documentElement);
+      this._resizeObserver.observe(document.body);
+      for (const dom of this._doms) this._resizeObserver.observe(dom);
+    }
+    if (window.MutationObserver) {
+      this._mutationObserver = new window.MutationObserver((records) => {
+        const affectsLayout = records.some((record) => {
+          if (OVERLAY_CANVASES.has(record.target)) return false;
+          if (record.type !== 'childList') return true;
+          return [...record.addedNodes, ...record.removedNodes]
+            .some((node) => !OVERLAY_CANVASES.has(node));
+        });
+        if (affectsLayout) this._layoutHandler();
+      });
+      this._mutationObserver.observe(document.documentElement, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        characterData: true,
+      });
+    }
   }
 
   // ---- Lifecycle ----------------------------------------------------------
@@ -591,13 +682,24 @@ class Snowfall {
    * Call this when the component is unmounted in an SPA to prevent memory leaks.
    */
   destroy() {
+    if (this._destroyed) return;
+    this._destroyed = true;
     this.removeAnimation();
-    window.removeEventListener('resize', this._resizeHandler);
-    if (this.canvas && this.canvas.parentNode) {
-      this.canvas.parentNode.removeChild(this.canvas);
+    if (this._refreshTimer !== undefined) {
+      window.clearTimeout(this._refreshTimer);
+      this._refreshTimer = undefined;
     }
+    window.removeEventListener('resize', this._layoutHandler);
+    window.removeEventListener('scroll', this._layoutHandler, true);
+    document.removeEventListener('load', this._layoutHandler, true);
+    document.fonts?.removeEventListener('loadingdone', this._layoutHandler);
+    this._resizeObserver?.disconnect();
+    this._mutationObserver?.disconnect();
+    this.canvas?.remove();
     this.flakes.length = 0;
     this.sills.length = 0;
+    this.flakeGrid.clear();
+    this.sillGrid.clear();
     this._doms = null;
   }
 }
